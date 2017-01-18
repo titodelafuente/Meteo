@@ -1,13 +1,13 @@
 //
 //    FILE: Meteo.ino
 //  AUTHOR: Alberto
-// VERSION: 0.4		16/01/2017
+// VERSION: 0.4		10/02/2017
 // PURPOSE: DHT Temperature & Humidity Sensor library for Arduino (2 sensors)
 //			Timetag each measurement
 // 				Messages consist of the letter T followed by ten digit time (as seconds since Jan 1 1970)
 // 				http://www.onlineconversion.com/unix_time.htm
-//				T1357041600 = 12:00 Jan 1 2013 
-//			Logging into file (SD card)
+//				E.g.  T1357041600 = 12:00 Jan 1 2013 
+//			Logging into daily file (SD card). Flush to file every hour.
 
 #include <dht.h>
 #include <TimeLib.h>
@@ -15,81 +15,115 @@
 #include <SPI.h>
 #include <SD.h>
 
-dht DHT;
-Sd2Card card;
 
 const int DHT22_SENSOR1_PIN = 6;
 const int DHT22_SENSOR2_PIN = 7;
 const int TIME_REQUEST = 7;    // ASCII bell character requests a time sync message 
-const int SD_CS_PIN = 13;
-
+const int SD_CS_PIN = 10;
 
 void setup() {
-  String str;
-  Serial.begin(115200);
+  Serial.begin(9600);
 
-  // SD Card
-  int sd_status;
-  sd_status = setup_SD_Card();
-  
   // Header
-  Serial.println("METEO PROGRAM ");
-  Serial.print("LIBRARY VERSION: ");
-  Serial.println(DHT_LIB_VERSION);
-  Serial.println();
-  
-  // Sync
-  setSyncProvider(requestSync);  //set function to call when sync required
-  Serial.println("Waiting for sync message: ...");
-  while(timeStatus() != timeSet){
-    if (Serial.available()>0) {
-      processSyncMessage();
-    }
-    str = "Sync Status: " + String(timeStatus());
-    Serial.println(str);
-	  delay(2000);
-  }
-  str = "Sync valid: " + logDate(now()) + " " + logTime(now());
+  String str = "METEO PROGRAM\nLIBRARY VERSION: " + String(DHT_LIB_VERSION) + "\n";
   Serial.println(str);
-  Serial.println("\nSensor,\t\tDay,\t\tTime,\t\tStatus,\tHumidity (%),\tTemp (C)");
-}
-
-//*********************************************************
-void loop()
-{
-	// sensor1
-	int chk = DHT.read22(DHT22_SENSOR1_PIN);
-	String str1 = logData("DHT22_S1", now(), chk, DHT);
-	Serial.println(str1);
- 
-	// sensor2
-	chk = DHT.read22(DHT22_SENSOR2_PIN);
-	String str2 = logData("DHT22_S2", now(), chk, DHT);
-	Serial.println(str2);
   
-	delay(15000);
+  // SD Card
+  if (setup_SD_Card() != 0 )
+    return;
+
+  // Time Sync
+  setup_Time(); 
 }
 
 //*********************************************************
-String logData(char id[], time_t t, int check, dht sensor) {
-	String sep = ", \t";	// separator
+void loop() {
+  static File fich;
+  char str[100];
+  time_t epoch = now();
+
+  // manage file
+  openFile(&fich, epoch);
+
+	// measurement sensor1
+  measureData("DHT22_S1", epoch, DHT22_SENSOR1_PIN, str);
+  writeFile(fich, str);
+  
+	// measurement sensor2
+  measureData("DHT22_S2", epoch, DHT22_SENSOR2_PIN, str);
+  writeFile(fich, str);
+  
+	delay(60000); // every 60"
+}
+
+//*********************************************************
+void measureData(const char id[], const time_t t, const int pin, char str[]) {
+	dht dhtsensor;
+  char strDate[15], strTime[15];
 	String ch;
+  int check = dhtsensor.read22(pin);
+
 	switch(check) {
-	case DHTLIB_OK:  
-		ch = "OK"; 
-		break;
-	case DHTLIB_ERROR_CHECKSUM: 
-		ch = "Checksum_error"; 
-		break;
-	case DHTLIB_ERROR_TIMEOUT: 
-		ch = "Time_out_error"; 
-		break;
-	default: 
-		ch = "Unknown_error"; 
-		break;
+  	case DHTLIB_OK:  
+  		ch = "OK"; 
+  		break;
+  	case DHTLIB_ERROR_CHECKSUM: 
+  		ch = "Checksum_error"; 
+  		break;
+  	case DHTLIB_ERROR_TIMEOUT: 
+  		ch = "TimeOut_error"; 
+  		break;
+  	default: 
+  		ch = "Unknown_error"; 
+  		break;
 	}
-	String str = id + sep + logDate(t) + sep + logTime(t) + sep + ch + sep + sensor.humidity + sep + sensor.temperature;
-	return str;
+  logEpoch(t, strDate, strTime);
+  sprintf(str, "%s,\t%s,\t%s,\t%s,\t%s,\t\t%s\n", id, strDate, strTime, ch.c_str(), String(dhtsensor.humidity).c_str(), String(dhtsensor.temperature).c_str() );
+}
+
+//*********************************************************
+// Create new file every day
+void openFile(File *f, const time_t t) {
+  static int day_previous = 0;
+  static int hour_previous = 0;
+  static char filename[15];
+  
+  if( day(t) != day_previous ){
+    day_previous = day(t);
+    hour_previous = hour(t);
+    
+    // close previous file
+    f->flush();    
+    f->close();
+    
+    // open new file metMMDD.0YY
+    String yy = String(year(t));
+    sprintf(filename,"met%02d%02d.0%s", month(t), day(t), yy.substring(2).c_str());
+    Serial.println(filename);
+    *f = SD.open(filename, FILE_WRITE);
+
+    char header[] = "Sensor,\t\tDate,\t\tTime,\t\tStatus,\tHumidity (%),\tTemp (C)\n";
+    writeFile(*f, header);
+  }else{
+    if( hour(t) != hour_previous ){
+      // save data to file every hour
+      hour_previous = hour(t);
+      f->flush();
+      f->close();
+      *f = SD.open(filename, FILE_WRITE);   // append
+      Serial.println("Data saved to file in SD card.");  
+    }
+  }
+}
+
+//*********************************************************
+void writeFile(const File f, const char str[]) {
+  Serial.print(str);
+  if (f) {
+    f.write(str);
+  }else{
+    Serial.print("ERROR: File not opened.\n");
+  }
 }
 
 //*********************************************************
@@ -101,7 +135,7 @@ time_t requestSync() {
 //*********************************************************
 void processSyncMessage() {
   unsigned long pctime;
-  const unsigned long DEFAULT_TIME = 1357041600; // Jan 1 2013
+  const unsigned long DEFAULT_TIME = 1483228800; // Jan 1 2017
   const char time_header='T';   // Header tag for serial time sync message
 
   if(Serial.find(time_header)) {
@@ -115,41 +149,23 @@ void processSyncMessage() {
 }
 
 //*********************************************************
-String logDate(time_t t){
-	// digital clock display of the time: yyyy-mm-dd
-	String str;
-	str = String(year(t)) + "-" + printDigits(month(t)) + "-" + printDigits(day(t));
-	return str;
-}
-
-//*********************************************************
-String logTime(time_t t){
-	// digital clock display of the time: hh:mm:ss
-	String str;
-	str = printDigits(hour(t)) + ":" + printDigits(minute(t)) + ":" + printDigits(second(t));
-	return str;
-}
-
-//*********************************************************
-String printDigits(int digits){
-	// utility function for digital clock display: prints leading 0
-	String str;
-	if(digits < 10)
-		str = "0";
-	str += digits;
-	return str;
+void logEpoch(const time_t t, char strTime[], char strDate[]){
+  // digital clock display of the time: yyyy-mm-dd
+  sprintf(strTime, "%04d-%02d-%02d", year(t), month(t), day(t));
+  // digital clock display of the time: HHhMM:SS
+  sprintf(strDate, "%02dh%02d:%02d", hour(t), minute(t), second(t));
 }
 
 //*********************************************************
 int setup_SD_Card() {
-	Serial.print("\nInitializing SD card... ");
+	Sd2Card card;
 
 	// testing if the card is working
 	if (!card.init(SPI_HALF_SPEED, SD_CS_PIN)) {
-		Serial.println("failed.");
+		Serial.println("ERROR: Initializing SD card.");
 		return -1;
-	}else {
-		Serial.println("wiring is correct and a card is present.");
+	} else {
+		Serial.println("Initializing SD card. Wiring is correct and a card is present.");
 	}
 
 	// print the type of card
@@ -167,11 +183,43 @@ int setup_SD_Card() {
 		default:
 			strType = "Unknown";
 	}
-	str = "Card type: " + strType;
+	str = "Card type: " + strType + "\n";
+
+  if (!SD.begin(SD_CS_PIN)) {
+    str += "ERROR: Initialization SD failed.\n";
+    return -1;
+  }else{
+    str += "Initialization SD done.\n";
+  }
 	Serial.println(str);
 
 	return 0;
 }
+
+//*********************************************************
+void setup_Time() {
+  String str;
+  char strDate[15], strTime[15];
+  int cont = 0; 
+  setSyncProvider(requestSync);  //set function to call when sync required
+  
+  Serial.println("Waiting for sync message: ...");
+  while(timeStatus() != timeSet){
+    // if there is an input in serial port or after 10 iterations
+    if (Serial.available()>0 || cont==10) {
+      processSyncMessage();
+    }
+    
+    str = "Sync Status: " + String(timeStatus());
+    Serial.println(str);
+    cont++;
+    delay(2000);
+  }
+  logEpoch(now(), strDate, strTime);
+  str = "Sync valid: " + String(strDate) + " " + String(strTime);
+  Serial.println(str);
+}
+
 //
 // END OF FILE
 //
